@@ -71,24 +71,33 @@ async def main(sqlite_file, pg_url):
         type_code = row["type"] if "type" in row.keys() and row["type"] is not None else "W"
         device_type_map = {
             "W": "wifi",
-            "B": "bluetooth", 
-            "D": "cell",
-            "G": "cell",
-            "E": "cell"
+            "B": "bluetooth", # Bluetooth classic
+            "D": "cell", # 2G/3G/4G/5G
+            "G": "cell", # GSM
+            "E": "bluetooth" # Bluetooth LE
         }
         device_type = device_type_map.get(type_code, "wifi")
         
         timestamp = parse_timestamp(row[timestamp_col])
         
-        # Use best coordinates if available, otherwise use last coordinates
-        lat = row["bestlat"] if "bestlat" in row.keys() and row["bestlat"] is not None else row["lastlat"]
-        lon = row["bestlon"] if "bestlon" in row.keys() and row["bestlon"] is not None else row["lastlon"]
+        # Use best coordinates if available, otherwise use last coordinates for device location
+        device_lat = row["bestlat"] if "bestlat" in row.keys() and row["bestlat"] is not None else row["lastlat"]
+        device_lon = row["bestlon"] if "bestlon" in row.keys() and row["bestlon"] is not None else row["lastlon"]
         signal = row["bestlevel"] if "bestlevel" in row.keys() and row["bestlevel"] is not None else 0
         
         # Skip if we don't have coordinates
-        if lat is None or lon is None:
+        if device_lat is None or device_lon is None:
             print(f"Warning: Skipping {bssid} - no coordinates available")
             continue
+            
+        # Debug: Print first few coordinates to verify they're being read
+        if hasattr(main, 'debug_count'):
+            main.debug_count += 1
+        else:
+            main.debug_count = 1
+            
+        if main.debug_count <= 5:
+            print(f"Debug: {bssid} -> lat: {device_lat}, lon: {device_lon}, signal: {signal}")
             
         # Clean the raw data to remove null bytes and other problematic characters
         raw = {}
@@ -100,15 +109,16 @@ async def main(sqlite_file, pg_url):
                 if clean_value.strip():
                     raw[key] = clean_value
 
-        # Insert or ignore device
-        await insert_device(pg_conn, device_type, bssid, ssid, timestamp, timestamp, lat, lon)
+        # Insert or ignore device (using best/last coordinates for general device location)
+        await insert_device(pg_conn, device_type, bssid, ssid, timestamp, timestamp, device_lat, device_lon)
 
         # Get UUID of device
         device_row = await pg_conn.fetchrow(
             "SELECT id FROM devices WHERE device_type = $1 AND device_id = $2", device_type, bssid
         )
         if device_row:
-            await insert_observation(pg_conn, device_row["id"], timestamp, lat, lon, signal, raw)
+            # For observations, use the same coordinates (this represents the sighting location)
+            await insert_observation(pg_conn, device_row["id"], timestamp, device_lat, device_lon, signal, raw)
 
     await pg_conn.close()
     sqlite_conn.close()
